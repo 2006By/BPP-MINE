@@ -338,7 +338,10 @@ class MCTSPlanner:
         
         # Use PCT to find best placement position
         pct_obs = state.get_pct_observation(selected_item)
-        pct_obs_tensor = torch.FloatTensor(pct_obs).unsqueeze(0).to(self.device)
+        # Reshape from 1D to 3D: (batch=1, num_nodes, node_features=9)
+        # Observation structure: internal_nodes + leaf_nodes + next_item, each with 9 features
+        total_nodes = state.internal_node_holder + state.leaf_node_holder + state.next_holder
+        pct_obs_tensor = torch.FloatTensor(pct_obs).reshape(1, total_nodes, 9).to(self.device)
         
         with torch.no_grad():
             # PCT outputs leaf node index
