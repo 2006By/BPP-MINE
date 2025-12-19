@@ -331,7 +331,7 @@ class MCTSPlanner:
             action_idx: Index of item in buffer to place
             
         Returns:
-            next_state: State after placement
+            state: Updated state (same object, modified in place)
         """
         # Get selected item from buffer
         selected_item = state.buffer[action_idx]
@@ -348,10 +348,12 @@ class MCTSPlanner:
             _, leaf_idx, _, _ = self.pct_policy(pct_obs_tensor, deterministic=True)
             leaf_idx = leaf_idx.item()
         
-        # Execute action in environment
-        next_state, reward, done, _ = state.step(action_idx, leaf_idx)
+        # Execute action in environment (modifies state in place)
+        # step() returns (observation, reward, done, info), we only need to call it
+        _, reward, done, _ = state.step((action_idx, leaf_idx))
         
-        return next_state
+        # Return the same state object (it's been modified in place)
+        return state
     
     def _backpropagate(self, node: MCTSNode, value: float):
         """
