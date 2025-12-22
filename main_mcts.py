@@ -23,7 +23,6 @@ from tensorboardX import SummaryWriter
 from set_transformer import SetTransformer
 from mcts_planner import MCTSPlanner
 from train_mcts import MCTSTrainer
-from parallel_trainer import ParallelMCTSTrainer
 from model import DRL_GAT
 import givenData
 from pct_envs.PctDiscrete0.bin3D_buffer import PackingDiscreteWithBuffer
@@ -88,14 +87,6 @@ def get_mcts_args():
     parser.add_argument('--use-temperature', action='store_true', default=True,
                        help='Use temperature for action sampling')
     
-    # Parallel training settings (for GPU optimization)
-    parser.add_argument('--use-parallel-trainer', action='store_true',
-                       help='Use parallel trainer for better GPU utilization')
-    parser.add_argument('--num-parallel-envs', type=int, default=16,
-                       help='Number of parallel environments (default: 16)')
-    parser.add_argument('--batch-size', type=int, default=64,
-                       help='Batch size for network updates (default: 64)')
-    
     # Logging and saving
     parser.add_argument('--exp-name', type=str, default='mcts_bin_packing',
                        help='Experiment name')
@@ -127,7 +118,9 @@ def get_mcts_args():
     args = parser.parse_args()
     
     # Set device
-    if args.no_cuda:
+    if args.no_cuda or not torch.cuda.is_available():
+        if not args.no_cuda:
+            print("Notice: CUDA not available (torch.cuda.is_available() is False). Using CPU.")
         args.device = torch.device('cpu')
     else:
         args.device = torch.device(f'cuda:{args.device}')
@@ -256,30 +249,15 @@ def main(args):
     
     args.save_dir = f'{args.save_dir}/{timeStr}'
     
-    # Choose trainer based on parallel option
-    if args.use_parallel_trainer:
-        trainer = ParallelMCTSTrainer(
-            set_transformer=set_transformer,
-            pct_policy=pct_policy,
-            mcts_planner=mcts_planner,
-            args=args,
-            writer=writer,
-            device=args.device,
-            num_parallel_envs=args.num_parallel_envs
-        )
-        print(f"✓ Parallel Trainer created (GPU-optimized)")
-        print(f"  Parallel environments: {args.num_parallel_envs}")
-        print(f"  Batch size: {args.batch_size}")
-    else:
-        trainer = MCTSTrainer(
-            set_transformer=set_transformer,
-            pct_policy=pct_policy,
-            mcts_planner=mcts_planner,
-            args=args,
-            writer=writer,
-            device=args.device
-        )
-        print(f"✓ Standard Trainer created")
+    trainer = MCTSTrainer(
+        set_transformer=set_transformer,
+        pct_policy=pct_policy,
+        mcts_planner=mcts_planner,
+        args=args,
+        writer=writer,
+        device=args.device
+    )
+    print(f"✓ Trainer created")
     
     print(f"  Set Transformer LR: {args.st_learning_rate}")
     print(f"  Train PCT: {args.train_pct}")
