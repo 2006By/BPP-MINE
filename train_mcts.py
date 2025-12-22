@@ -5,6 +5,7 @@ import numpy as np
 from collections import deque
 import time
 import os
+from torch.cuda.amp import autocast, GradScaler
 
 class MCTSTrainer:
     """
@@ -57,6 +58,12 @@ class MCTSTrainer:
             for param in pct_policy.parameters():
                 param.requires_grad = False
             self.pct_optimizer = None
+        
+        # Mixed precision training
+        self.use_amp = getattr(args, 'use_amp', True) and device.type == 'cuda'
+        self.scaler = GradScaler() if self.use_amp else None
+        if self.use_amp:
+            print("Using Automatic Mixed Precision (AMP) for training")
         
         # Training statistics
         self.episode_count = 0
@@ -160,45 +167,96 @@ class MCTSTrainer:
         Returns:
             train_stats: Dict with loss values
         """
-        total_policy_loss = 0
-        total_value_loss = 0
-        total_pct_loss = 0
-        n_updates = 0
+        if len(states) == 0:
+            return {
+                'policy_loss': 0.0,
+                'value_loss': 0.0,
+                'pct_loss': 0.0
+            }
         
-        # Convert to tensors
-        for state, pi_target, value_target in zip(states, target_policies, returns):
-            # Prepare inputs
-            buffer_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            pi_target_tensor = torch.FloatTensor(pi_target).to(self.device)
-            value_target_tensor = torch.FloatTensor([value_target]).to(self.device)
+        # OPTIMIZATION: Batch all states together for single forward/backward pass
+        # Convert lists to batched tensors
+        batch_states = torch.stack([
+            torch.FloatTensor(s) for s in states
+        ]).to(self.device)  # Shape: (batch_size, buffer_size, 4)
+        
+        batch_targets = torch.stack([
+            torch.FloatTensor(p) for p in target_policies
+        ]).to(self.device)  # Shape: (batch_size, buffer_size)
+        
+        batch_values = torch.FloatTensor(returns).to(self.device)  # Shape: (batch_size,)
+        
+        # Get masks for all states
+        # mask = True where buffer item is empty (padding)
+        batch_masks = torch.sum(batch_states, dim=-1) == 0  # Shape: (batch_size, buffer_size)
+        
+        # Forward pass with optional mixed precision
+        if self.use_amp:
+            with autocast():
+                # Forward through Set Transformer (batched)
+                pi_pred, value_pred = self.set_transformer(
+                    batch_states, 
+                    batch_masks.bool()
+                )  # pi_pred: (batch_size, buffer_size), value_pred: (batch_size, 1)
+                
+                value_pred = value_pred.squeeze(-1)  # (batch_size,)
+                
+                # Policy loss: Cross-entropy between MCTS policy and predicted policy
+                # Compute -sum(p_target * log(p_pred)) for each sample, then average
+                policy_loss = -torch.sum(
+                    batch_targets * torch.log(pi_pred + 1e-8),
+                    dim=-1
+                ).mean()
+                
+                # Value loss: MSE between predicted value and actual return
+                value_loss = F.mse_loss(value_pred, batch_values)
+                
+                # Combined loss for Set Transformer
+                st_loss = (
+                    self.args.policy_loss_weight * policy_loss +
+                    self.args.value_loss_weight * value_loss
+                )
             
-            # Get mask
-            mask = torch.FloatTensor(
-                np.sum(state, axis=-1) == 0
-            ).unsqueeze(0).to(self.device)
+            # Backward pass with gradient scaling
+            self.st_optimizer.zero_grad()
+            self.scaler.scale(st_loss).backward()
             
-            # Forward pass through Set Transformer
-            pi_pred, value_pred = self.set_transformer(buffer_tensor, mask.bool())
-            pi_pred = pi_pred.squeeze(0)
-            value_pred = value_pred.squeeze(0)
-            
-            # Policy loss: Cross-entropy between MCTS policy and predicted policy
-            # KL divergence: sum(p * log(p/q)) = sum(p * log(p)) - sum(p * log(q))
-            # For training, we minimize: -sum(p_target * log(p_pred))
-            policy_loss = -torch.sum(
-                pi_target_tensor * torch.log(pi_pred + 1e-8)
+            # Unscale gradients before clipping
+            self.scaler.unscale_(self.st_optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                self.set_transformer.parameters(),
+                self.args.max_grad_norm
             )
             
-            # Value loss: MSE between predicted value and actual return
-            value_loss = F.mse_loss(value_pred, value_target_tensor)
+            # Optimizer step with scaler
+            self.scaler.step(self.st_optimizer)
+            self.scaler.update()
             
-            # Combined loss for Set Transformer
+        else:
+            # Standard precision training (fallback for CPU)
+            # Forward through Set Transformer (batched)
+            pi_pred, value_pred = self.set_transformer(
+                batch_states, 
+                batch_masks.bool()
+            )
+            value_pred = value_pred.squeeze(-1)
+            
+            # Policy loss
+            policy_loss = -torch.sum(
+                batch_targets * torch.log(pi_pred + 1e-8),
+                dim=-1
+            ).mean()
+            
+            # Value loss
+            value_loss = F.mse_loss(value_pred, batch_values)
+            
+            # Combined loss
             st_loss = (
                 self.args.policy_loss_weight * policy_loss +
                 self.args.value_loss_weight * value_loss
             )
             
-            # Update Set Transformer
+            # Standard backward pass
             self.st_optimizer.zero_grad()
             st_loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -206,23 +264,19 @@ class MCTSTrainer:
                 self.args.max_grad_norm
             )
             self.st_optimizer.step()
-            
-            # Optionally update PCT (if training jointly)
-            if self.pct_optimizer is not None and self.args.train_pct:
-                # PCT can be trained with regular RL loss
-                # For now, skip PCT updates (can be added later)
-                pass
-            
-            # Accumulate statistics
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            n_updates += 1
         
-        # Return average losses
+        # Optionally update PCT (if training jointly)
+        pct_loss_value = 0.0
+        if self.pct_optimizer is not None and self.args.train_pct:
+            # PCT can be trained with regular RL loss
+            # For now, skip PCT updates (can be added later)
+            pass
+        
+        # Return statistics
         return {
-            'policy_loss': total_policy_loss / max(n_updates, 1),
-            'value_loss': total_value_loss / max(n_updates, 1),
-            'pct_loss': total_pct_loss / max(n_updates, 1)
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'pct_loss': pct_loss_value
         }
     
     def _log_episode(self, stats):
@@ -254,10 +308,14 @@ class MCTSTrainer:
         episode_ratios = deque(maxlen=100)
         
         start_time = time.time()
+        last_print_time = start_time
+        last_print_steps = 0
         
         for episode in range(num_episodes):
             # Train one episode
+            episode_start = time.time()
             stats = self.train_episode(env)
+            episode_time = time.time() - episode_start
             
             # Track statistics
             episode_rewards.append(stats['episode_reward'])
@@ -265,11 +323,18 @@ class MCTSTrainer:
             
             # Print progress
             if (episode + 1) % self.args.print_interval == 0:
-                elapsed = time.time() - start_time
-                fps = self.step_count / elapsed
+                current_time = time.time()
+                elapsed = current_time - start_time
+                interval_time = current_time - last_print_time
+                interval_steps = self.step_count - last_print_steps
+                
+                # Calculate throughput metrics
+                overall_fps = self.step_count / elapsed if elapsed > 0 else 0
+                interval_fps = interval_steps / interval_time if interval_time > 0 else 0
                 
                 print(f"\nEpisode {episode + 1}/{num_episodes}")
-                print(f"  Steps: {self.step_count}, FPS: {fps:.1f}")
+                print(f"  Time: {elapsed:.1f}s, Episode time: {episode_time:.2f}s")
+                print(f"  Steps: {self.step_count}, FPS: {overall_fps:.1f} (recent: {interval_fps:.1f})")
                 print(f"  Last 100 episodes:")
                 print(f"    Mean reward: {np.mean(episode_rewards):.4f}")
                 print(f"    Mean ratio: {np.mean(episode_ratios):.4f}")
@@ -277,6 +342,15 @@ class MCTSTrainer:
                 print(f"  Losses:")
                 print(f"    Policy: {stats['policy_loss']:.4f}")
                 print(f"    Value: {stats['value_loss']:.4f}")
+                
+                # Log throughput metrics
+                if self.writer is not None:
+                    self.writer.add_scalar('Performance/FPS', overall_fps, episode + 1)
+                    self.writer.add_scalar('Performance/IntervalFPS', interval_fps, episode + 1)
+                    self.writer.add_scalar('Performance/EpisodeTime', episode_time, episode + 1)
+                
+                last_print_time = current_time
+                last_print_steps = self.step_count
             
             # Save model
             if (episode + 1) % self.args.save_interval == 0:
@@ -284,6 +358,8 @@ class MCTSTrainer:
         
         print("\nTraining completed!")
         print(f"Final mean ratio: {np.mean(episode_ratios):.4f}")
+        print(f"Total time: {time.time() - start_time:.1f}s")
+        print(f"Average FPS: {self.step_count / (time.time() - start_time):.1f}")
     
     def save_checkpoint(self, episode):
         """Save model checkpoint."""

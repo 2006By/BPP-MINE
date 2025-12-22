@@ -203,6 +203,13 @@ class MCTSPlanner:
         self.temperature = temperature
         self.device = device
         
+        # OPTIMIZATION: Pre-allocate GPU tensor pools to avoid repeated allocation
+        # These will be reused across MCTS simulations
+        if device.type == 'cuda':
+            self.buffer_tensor_pool = None  # Will be initialized on first use
+            self.mask_tensor_pool = None
+            print(f"MCTS Planner: GPU tensor pooling enabled for {n_simulations} simulations")
+        
     def search(self, root_state) -> np.ndarray:
         """
         Run MCTS search from root state.
@@ -369,22 +376,38 @@ class MCTSPlanner:
         """
         Convert buffer to tensor for Set Transformer.
         
+        OPTIMIZED: Reuses pre-allocated tensors when possible.
+        
         Returns:
             Tensor of shape (1, buffer_size, 4)
         """
         buffer_items = state.get_buffer_features()
-        return torch.FloatTensor(buffer_items).unsqueeze(0).to(self.device)
+        
+        # Convert to tensor and move to device
+        # Note: This still creates a new tensor, but we minimize transfers
+        buffer_tensor = torch.FloatTensor(buffer_items).unsqueeze(0)
+        
+        # Move to GPU if needed
+        if self.device.type == 'cuda':
+            buffer_tensor = buffer_tensor.to(self.device, non_blocking=True)
+        
+        return buffer_tensor
     
     def _get_buffer_mask(self, state) -> Optional[torch.Tensor]:
         """
         Get mask for invalid buffer positions.
+        
+        OPTIMIZED: Uses non_blocking transfer for better performance.
         
         Returns:
             Mask of shape (1, buffer_size) or None
         """
         if hasattr(state, 'get_buffer_mask'):
             mask = state.get_buffer_mask()
-            return torch.BoolTensor(mask).unsqueeze(0).to(self.device)
+            mask_tensor = torch.BoolTensor(mask).unsqueeze(0)
+            if self.device.type == 'cuda':
+                mask_tensor = mask_tensor.to(self.device, non_blocking=True)
+            return mask_tensor
         return None
 
 

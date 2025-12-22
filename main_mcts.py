@@ -107,6 +107,12 @@ def get_mcts_args():
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     
+    # Performance settings
+    parser.add_argument('--use-amp', action='store_true', default=True,
+                       help='Use Automatic Mixed Precision (AMP) training')
+    parser.add_argument('--no-amp', action='store_false', dest='use_amp',
+                       help='Disable AMP training')
+    
     # Evaluation
     parser.add_argument('--evaluate', action='store_true',
                        help='Evaluation mode')
