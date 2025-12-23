@@ -62,7 +62,7 @@ def get_mcts_args():
     parser.add_argument('--gat-layer-num', type=int, default=1)
     
     # MCTS settings
-    parser.add_argument('--mcts-simulations', type=int, default=200,
+    parser.add_argument('--mcts-simulations', type=int, default=100,
                        help='Number of MCTS simulations per decision')
     parser.add_argument('--mcts-c-puct', type=float, default=1.0,
                        help='Exploration constant for UCB')

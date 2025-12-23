@@ -152,8 +152,8 @@ class SetTransformer(nn.Module):
                 0.0
             )
             # Average over valid items only
-            valid_counts = (~mask).sum(dim=1, keepdim=True).clamp(min=1)
-            pooled = encoded_items_masked.sum(dim=1) / valid_counts.unsqueeze(-1)
+            valid_counts = (~mask).sum(dim=1, keepdim=True).float()  # (batch_size, 1)
+            pooled = encoded_items_masked.sum(dim=1) / valid_counts  # (batch_size, d_model)
         else:
             # Simple mean pooling
             pooled = encoded_items.mean(dim=1)
