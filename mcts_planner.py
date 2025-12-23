@@ -221,35 +221,58 @@ class MCTSPlanner:
         
     def search(self, root_state) -> np.ndarray:
         """
-        Run MCTS search from root state.
+        Run MCTS search from root state with optional batched inference.
         
         Args:
             root_state: Initial environment state
-            
+        
         Returns:
-            action_probs: Probability distribution over buffer items (size: buffer_size)
+            action_probs: Probability distribution over buffer items
         """
         # Create root node
         root = MCTSNode(state=root_state)
+    
+        if self.use_batch_inference:
+            # OPTIMIZED: Batched inference path
+            nodes_to_expand = []
         
-        # Run simulations
-        for _ in range(self.n_simulations):
-            # 1. Selection: Traverse tree with UCB
-            node = self._select(root)
+            for sim_idx in range(self.n_simulations):
+                # Selection
+                node = self._select(root)
             
-            # 2. Expansion: Expand leaf node if not terminal
-            if not node.is_terminal() and node.visit_count > 0:
-                node = self._expand(node)
+                # Collect nodes for batch expansion
+                if not node.is_terminal() and node.visit_count > 0:
+                    nodes_to_expand.append(node)
             
-            # 3. Simulation: Rollout with PCT to get value
-            value = self._simulate(node)
+                # Process batch when full or at end
+                should_process = (
+                    len(nodes_to_expand) >= self.inference_batch_size or
+                    sim_idx == self.n_simulations - 1
+                )
             
-            # 4. Backpropagation: Update all ancestors
-            self._backpropagate(node, value)
-        
-        # Get action probabilities from visit counts
+                if should_process and nodes_to_expand:
+                    # Batch expand (single GPU call for all nodes!)
+                    expanded_nodes = self._expand_batch(nodes_to_expand)
+                
+                # Simulate and backpropagate each
+                for exp_node in expanded_nodes:
+                    value = self._simulate(exp_node)
+                    self._backpropagate(exp_node, value)
+                
+                nodes_to_expand = []
+        else:
+            # Original serial processing
+            for _ in range(self.n_simulations):
+                node = self._select(root)
+            
+                if not node.is_terminal() and node.visit_count > 0:
+                    node = self._expand(node)
+            
+                value = self._simulate(node)
+                self._backpropagate(node, value)
+    
+        # Get action probabilities
         action_probs = root.get_action_probs(temperature=self.temperature)
-        
         return action_probs
     
     def _select(self, node: MCTSNode) -> MCTSNode:
@@ -419,6 +442,58 @@ class MCTSPlanner:
             return mask_tensor
         return None
 
+    def _expand_batch(self, nodes: list):
+        """
+        OPTIMIZED: Expand multiple nodes in a single batch for GPU efficiency.
+    
+        Args:
+            nodes: List of nodes to expand
+        
+        Returns:
+            List of first children for each expanded node
+        """
+        if not nodes:
+            return []
+    
+        # Collect all states
+        buffer_tensors = []
+        masks = []
+    
+        for node in nodes:
+            buffer_items = node.state.get_buffer_features()
+            buffer_tensors.append(torch.FloatTensor(buffer_items))
+        
+            if hasattr(node.state, 'get_buffer_mask'):
+                mask = node.state.get_buffer_mask()
+                masks.append(torch.BoolTensor(mask))
+            else:
+                masks.append(torch.zeros(len(buffer_items), dtype=torch.bool))
+    
+        # Stack into batch
+            batch_buffers = torch.stack(buffer_tensors).to(self.device, non_blocking=True)
+            batch_masks = torch.stack(masks).to(self.device, non_blocking=True)
+    
+        # Single batched forward pass - KEY OPTIMIZATION!
+        with torch.no_grad():
+            batch_priors, _ = self.set_transformer(batch_buffers, batch_masks)
+            batch_priors = batch_priors.cpu().numpy()  # (batch_size, buffer_size)
+    
+        # Expand each node with its priors
+        expanded_nodes = []
+        for node, priors in zip(nodes, batch_priors):
+            valid_actions = [i for i in range(len(node.state.buffer))]
+        
+            for action_idx in valid_actions:
+                child_state = copy.deepcopy(node.state)
+                node.add_child(action_idx, child_state, priors[action_idx])
+        
+            # Return first child for simulation
+            if node.children:
+                expanded_nodes.append(next(iter(node.children.values())))
+            else:
+                expanded_nodes.append(node)
+    
+        return expanded_nodes
 
 def test_mcts():
     """Simple test for MCTS planner (requires environment to be implemented)."""
