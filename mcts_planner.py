@@ -255,9 +255,12 @@ class MCTSPlanner:
                     # Batch expand (single GPU call for all nodes!)
                     expanded_nodes = self._expand_batch(nodes_to_expand)
                 
-                    # Simulate and backpropagate each
-                    for exp_node in expanded_nodes:
-                        value = self._simulate(exp_node)
+                    # OPTIMIZED: Batch simulate all expanded nodes together!
+                    # This is the key optimization - one batched rollout instead of N serial ones
+                    values = self._simulate_batch(expanded_nodes)
+                    
+                    # Backpropagate each value
+                    for exp_node, value in zip(expanded_nodes, values):
                         self._backpropagate(exp_node, value)
                 
                     nodes_to_expand = []
@@ -507,6 +510,104 @@ class MCTSPlanner:
                 expanded_nodes.append(node)
     
         return expanded_nodes
+
+    def _simulate_batch(self, nodes: list) -> list:
+        """
+        OPTIMIZED: Run multiple simulations in parallel with batched inference.
+        
+        This is the key optimization for GPU utilization.
+        Instead of running simulations one-by-one, we batch them together.
+        
+        Args:
+            nodes: List of nodes to simulate from
+            
+        Returns:
+            List of values (space utilization ratios)
+        """
+        if not nodes:
+            return []
+        
+        # 1. Copy all states for simulation
+        states = []
+        for node in nodes:
+            state = copy.deepcopy(node.state)
+            # Execute node's action if needed
+            if node.action_idx is not None and not hasattr(state, '_action_executed'):
+                state = self._execute_action(state, node.action_idx)
+                state._action_executed = True
+            states.append(state)
+        
+        # Track which states are still active (not done)
+        active_mask = [not s.done and len(s.buffer) > 0 for s in states]
+        
+        # 2. Parallel rollout with batched inference
+        max_steps = 200  # Prevent infinite loops
+        for step in range(max_steps):
+            # Collect active states
+            active_indices = [i for i, active in enumerate(active_mask) if active]
+            if not active_indices:
+                break
+            
+            active_states = [states[i] for i in active_indices]
+            
+            # --- Batch Set Transformer inference ---
+            buffer_tensors = []
+            masks = []
+            for s in active_states:
+                buffer_items = s.get_buffer_features()
+                buffer_tensors.append(torch.FloatTensor(buffer_items))
+                if hasattr(s, 'get_buffer_mask'):
+                    masks.append(torch.BoolTensor(s.get_buffer_mask()))
+                else:
+                    masks.append(torch.zeros(len(buffer_items), dtype=torch.bool))
+            
+            batch_buffers = torch.stack(buffer_tensors).to(self.device, non_blocking=True)
+            batch_masks = torch.stack(masks).to(self.device, non_blocking=True)
+            
+            with torch.no_grad():
+                batch_probs, _ = self.set_transformer(batch_buffers, batch_masks)
+                batch_action_indices = batch_probs.argmax(dim=-1).cpu().numpy()
+            
+            # --- Batch PCT inference ---
+            pct_obs_list = []
+            for i, s in enumerate(active_states):
+                action_idx = batch_action_indices[i]
+                if action_idx < len(s.buffer):
+                    selected_item = s.buffer[action_idx]
+                    pct_obs = s.get_pct_observation(selected_item)
+                    total_nodes = s.internal_node_holder + s.leaf_node_holder + s.next_holder
+                    pct_obs_list.append(torch.FloatTensor(pct_obs).reshape(total_nodes, 9))
+                else:
+                    # Invalid action, use dummy observation
+                    total_nodes = s.internal_node_holder + s.leaf_node_holder + s.next_holder
+                    pct_obs_list.append(torch.zeros(total_nodes, 9))
+            
+            batch_pct_obs = torch.stack(pct_obs_list).to(self.device, non_blocking=True)
+            
+            with torch.no_grad():
+                _, batch_leaf_indices, _, _ = self.pct_policy(batch_pct_obs, deterministic=True)
+                batch_leaf_indices = batch_leaf_indices.cpu().numpy()
+            
+            # --- Execute actions ---
+            for i, orig_idx in enumerate(active_indices):
+                s = states[orig_idx]
+                action_idx = int(batch_action_indices[i])
+                leaf_idx = int(batch_leaf_indices[i])
+                
+                if action_idx < len(s.buffer):
+                    try:
+                        s.step((action_idx, leaf_idx))
+                    except:
+                        s.done = True
+                else:
+                    s.done = True
+                
+                # Update active mask
+                active_mask[orig_idx] = not s.done and len(s.buffer) > 0
+        
+        # 3. Return final values
+        values = [s.get_ratio() for s in states]
+        return values
 
 def test_mcts():
     """Simple test for MCTS planner (requires environment to be implemented)."""
