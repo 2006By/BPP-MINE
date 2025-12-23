@@ -241,7 +241,8 @@ class MCTSPlanner:
                 node = self._select(root)
             
                 # Collect nodes for batch expansion
-                if not node.is_terminal() and node.visit_count > 0:
+                # Expand if node is not terminal and not already expanded
+                if not node.is_terminal() and not node.is_expanded():
                     nodes_to_expand.append(node)
             
                 # Process batch when full or at end
@@ -266,7 +267,8 @@ class MCTSPlanner:
             for _ in range(self.n_simulations):
                 node = self._select(root)
             
-                if not node.is_terminal() and node.visit_count > 0:
+                # Expand if node is not terminal and not already expanded
+                if not node.is_terminal() and not node.is_expanded():
                     node = self._expand(node)
             
                 value = self._simulate(node)
@@ -274,6 +276,16 @@ class MCTSPlanner:
     
         # Get action probabilities
         action_probs = root.get_action_probs(temperature=self.temperature)
+        
+        # Fallback if root was never expanded (shouldn't happen, but be safe)
+        if action_probs is None:
+            # Return uniform distribution over buffer items
+            buffer_size = root_state.buffer_size
+            n_items = len(root_state.buffer)
+            action_probs = np.zeros(buffer_size, dtype=np.float32)
+            if n_items > 0:
+                action_probs[:n_items] = 1.0 / n_items
+        
         return action_probs
     
     def _select(self, node: MCTSNode) -> MCTSNode:
