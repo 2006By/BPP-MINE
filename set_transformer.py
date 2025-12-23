@@ -286,8 +286,8 @@ if __name__ == '__main__':
     policy_probs_perm, _ = model(buffer_items_perm)
     
     # Probabilities should be permuted the same way
-    policy_probs_unperm = policy_probs_perm[:, torch.argsort(perm), :]
+    policy_probs_unperm = policy_probs_perm[:, torch.argsort(perm)]
     diff = (policy_probs_orig - policy_probs_unperm).abs().max()
     print(f"Max difference after permutation: {diff.item()}")  # Should be ~0
     
-    print("\n✓ All tests passed!")
+    print("\n[OK] All tests passed!")

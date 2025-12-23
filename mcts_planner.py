@@ -254,12 +254,13 @@ class MCTSPlanner:
                     # Batch expand (single GPU call for all nodes!)
                     expanded_nodes = self._expand_batch(nodes_to_expand)
                 
-                # Simulate and backpropagate each
-                for exp_node in expanded_nodes:
-                    value = self._simulate(exp_node)
-                    self._backpropagate(exp_node, value)
+                    # Simulate and backpropagate each
+                    for exp_node in expanded_nodes:
+                        value = self._simulate(exp_node)
+                        self._backpropagate(exp_node, value)
                 
-                nodes_to_expand = []
+                    nodes_to_expand = []
+
         else:
             # Original serial processing
             for _ in range(self.n_simulations):
@@ -470,8 +471,8 @@ class MCTSPlanner:
                 masks.append(torch.zeros(len(buffer_items), dtype=torch.bool))
     
         # Stack into batch
-            batch_buffers = torch.stack(buffer_tensors).to(self.device, non_blocking=True)
-            batch_masks = torch.stack(masks).to(self.device, non_blocking=True)
+        batch_buffers = torch.stack(buffer_tensors).to(self.device, non_blocking=True)
+        batch_masks = torch.stack(masks).to(self.device, non_blocking=True)
     
         # Single batched forward pass - KEY OPTIMIZATION!
         with torch.no_grad():
