@@ -327,8 +327,8 @@ class MCTSPlanner:
         valid_actions = [i for i in range(len(node.state.buffer))]
         
         for action_idx in valid_actions:
-            # Copy state for simulation
-            child_state = copy.deepcopy(node.state)
+            # Use lightweight copy instead of deepcopy for better performance
+            child_state = node.state.lightweight_copy()
             
             # Simulate action (will be executed in _simulate)
             # Here we just create the node structure
@@ -352,8 +352,8 @@ class MCTSPlanner:
         Returns:
             value: Final space utilization ratio
         """
-        # Copy state for simulation
-        state = copy.deepcopy(node.state)
+        # Use lightweight copy instead of deepcopy for better performance
+        state = node.state.lightweight_copy()
         
         # If this is a newly expanded child, execute its action first
         if node.action_idx is not None and not hasattr(state, '_action_executed'):
@@ -500,7 +500,8 @@ class MCTSPlanner:
             valid_actions = [i for i in range(len(node.state.buffer))]
         
             for action_idx in valid_actions:
-                child_state = copy.deepcopy(node.state)
+                # Use lightweight copy instead of deepcopy
+                child_state = node.state.lightweight_copy()
                 node.add_child(action_idx, child_state, priors[action_idx])
         
             # Return first child for simulation
@@ -527,10 +528,10 @@ class MCTSPlanner:
         if not nodes:
             return []
         
-        # 1. Copy all states for simulation
+        # 1. Use lightweight copy for all states (much faster than deepcopy)
         states = []
         for node in nodes:
-            state = copy.deepcopy(node.state)
+            state = node.state.lightweight_copy()
             # Execute node's action if needed
             if node.action_idx is not None and not hasattr(state, '_action_executed'):
                 state = self._execute_action(state, node.action_idx)

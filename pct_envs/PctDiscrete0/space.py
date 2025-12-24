@@ -313,6 +313,82 @@ class Space(object):
         self.EMS3D = dict()
         self.EMS3D[0] = np.array([0, 0, 0, self.plain_size[0], self.plain_size[1], self.plain_size[2], self.serial_number])
 
+    def get_state(self):
+        """
+        Get a lightweight state snapshot for MCTS simulation.
+        This is much faster than copy.deepcopy().
+        
+        Returns:
+            dict: State snapshot containing all necessary data
+        """
+        # Save box data as tuples (much faster than copying Box objects)
+        boxes_data = []
+        for b in self.boxes:
+            boxes_data.append({
+                'x': b.x, 'y': b.y, 'z': b.z,
+                'lx': b.lx, 'ly': b.ly, 'lz': b.lz,
+                'mass': b.mass,
+                'vertex_low': b.vertex_low.copy(),
+                'vertex_high': b.vertex_high.copy(),
+            })
+        
+        # Copy ZMAP (relatively small structure)
+        zmap_copy = {}
+        for k, v in self.ZMAP.items():
+            zmap_copy[k] = {
+                'x_up': v['x_up'].copy() if isinstance(v['x_up'], list) else list(v['x_up']),
+                'y_left': v['y_left'].copy() if isinstance(v['y_left'], list) else list(v['y_left']),
+                'x_bottom': v['x_bottom'].copy() if isinstance(v['x_bottom'], list) else list(v['x_bottom']),
+                'y_right': v['y_right'].copy() if isinstance(v['y_right'], list) else list(v['y_right']),
+            }
+        
+        return {
+            'plain': self.plain.copy(),
+            'box_vec': self.box_vec.copy(),
+            'box_idx': self.box_idx,
+            'height': self.height,
+            'serial_number': self.serial_number,
+            'NOEMS': self.NOEMS,
+            'EMS': [e.copy() for e in self.EMS],
+            'ZMAP': zmap_copy,
+            'boxes_data': boxes_data,
+        }
+    
+    def restore_state(self, state):
+        """
+        Restore state from a lightweight snapshot.
+        
+        Args:
+            state: State snapshot from get_state()
+        """
+        self.plain = state['plain'].copy()
+        self.box_vec = state['box_vec'].copy()
+        self.box_idx = state['box_idx']
+        self.height = state['height']
+        self.serial_number = state['serial_number']
+        self.NOEMS = state['NOEMS']
+        self.EMS = [e.copy() for e in state['EMS']]
+        
+        # Restore ZMAP
+        self.ZMAP = {}
+        for k, v in state['ZMAP'].items():
+            self.ZMAP[k] = {
+                'x_up': v['x_up'].copy(),
+                'y_left': v['y_left'].copy(),
+                'x_bottom': v['x_bottom'].copy(),
+                'y_right': v['y_right'].copy(),
+            }
+        
+        # Rebuild boxes from saved data
+        self.boxes = []
+        for bd in state['boxes_data']:
+            # Create a minimal Box object with necessary attributes
+            box = Box(bd['x'], bd['y'], bd['z'], bd['lx'], bd['ly'], 
+                     bd['vertex_low'][2], bd['mass'] / (bd['x'] * bd['y'] * bd['z']))
+            box.vertex_low = bd['vertex_low'].copy()
+            box.vertex_high = bd['vertex_high'].copy()
+            self.boxes.append(box)
+
     @staticmethod
     def update_height_graph(plain, box):
         plain = copy.deepcopy(plain)
@@ -379,6 +455,9 @@ class Space(object):
                 box_now.bottom_whole_contact_area = self.scale_down(ConvexHull(combine_contact_points))
         sta_flag = self.check_box(x, y, lx, ly, z, max_h, box_now, setting)
         if sta_flag:
+            # Check if we've reached the maximum number of boxes
+            if self.box_idx >= len(self.box_vec):
+                return False  # Cannot place more boxes
             self.boxes.append(box_now)  # record rotated box
             self.plain = self.update_height_graph(self.plain, self.boxes[-1])
             self.height = max(self.height, max_h + z)

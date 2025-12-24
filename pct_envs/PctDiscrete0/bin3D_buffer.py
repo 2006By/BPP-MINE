@@ -394,9 +394,71 @@ class PackingDiscreteWithBuffer(gym.Env):
         """Get current space utilization ratio."""
         return self.space.get_ratio()
     
+    def get_state_snapshot(self):
+        """
+        Get a lightweight state snapshot for MCTS simulation.
+        Much faster than copy.deepcopy() - only copies essential data.
+        
+        Returns:
+            dict: State snapshot that can be used with restore_state_snapshot()
+        """
+        return {
+            'space_state': self.space.get_state(),
+            'buffer': [{'size': item['size'].copy() if hasattr(item['size'], 'copy') else list(item['size']),
+                       'density': item['density'],
+                       'original': item['original']} for item in self.buffer],
+            'item_queue': [{'size': item['size'].copy() if hasattr(item['size'], 'copy') else list(item['size']),
+                           'density': item['density'],
+                           'original': item['original']} for item in self.item_queue],
+            'done': self.done,
+            'packed': [p.copy() if hasattr(p, 'copy') else list(p) for p in self.packed] if hasattr(self, 'packed') else [],
+        }
+    
+    def restore_state_snapshot(self, snapshot):
+        """
+        Restore environment state from a lightweight snapshot.
+        
+        Args:
+            snapshot: State snapshot from get_state_snapshot()
+        """
+        self.space.restore_state(snapshot['space_state'])
+        self.buffer = [{'size': list(item['size']),
+                       'density': item['density'],
+                       'original': item['original']} for item in snapshot['buffer']]
+        self.item_queue = [{'size': list(item['size']),
+                           'density': item['density'],
+                           'original': item['original']} for item in snapshot['item_queue']]
+        self.done = snapshot['done']
+        self.packed = [list(p) for p in snapshot['packed']] if 'packed' in snapshot else []
+    
+    def lightweight_copy(self):
+        """
+        Create a lightweight copy of the environment for MCTS simulation.
+        Uses state snapshot instead of deep copy for better performance.
+        
+        Returns:
+            PackingDiscreteWithBuffer: A new environment instance with copied state
+        """
+        # Create new environment with same configuration
+        new_env = PackingDiscreteWithBuffer(
+            setting=self.setting,
+            container_size=self.bin_size,
+            item_set=self.item_set,
+            internal_node_holder=self.internal_node_holder,
+            leaf_node_holder=self.leaf_node_holder,
+            next_holder=self.next_holder,
+            buffer_size=self.buffer_size,
+            total_items=self.total_items,
+            LNES=self.LNES
+        )
+        # Restore state from snapshot
+        new_env.restore_state_snapshot(self.get_state_snapshot())
+        return new_env
+    
     def copy(self):
         """Create a deep copy of the environment for simulation."""
-        return copy.deepcopy(self)
+        # Use lightweight copy for better performance
+        return self.lightweight_copy()
 
 
 # For compatibility with gym.make()

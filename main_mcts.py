@@ -39,7 +39,7 @@ def get_mcts_args():
                        help='Experiment setting (1/2/3)')
     parser.add_argument('--buffer-size', type=int, default=10,
                        help='Number of items in lookahead buffer')
-    parser.add_argument('--total-items', type=int, default=150,
+    parser.add_argument('--total-items', type=int, default=100,
                        help='Total items per episode')
     parser.add_argument('--lnes', type=str, default='EMS',
                        help='Leaf Node Expansion Scheme')
@@ -62,7 +62,7 @@ def get_mcts_args():
     parser.add_argument('--gat-layer-num', type=int, default=1)
     
     # MCTS settings
-    parser.add_argument('--mcts-simulations', type=int, default=100,
+    parser.add_argument('--mcts-simulations', type=int, default=50,
                        help='Number of MCTS simulations per decision')
     parser.add_argument('--mcts-c-puct', type=float, default=1.0,
                        help='Exploration constant for UCB')
@@ -94,7 +94,7 @@ def get_mcts_args():
                        help='Directory to save models')
     parser.add_argument('--log-dir', type=str, default='./logs/mcts_runs',
                        help='Directory for TensorBoard logs')
-    parser.add_argument('--print-interval', type=int, default=10,
+    parser.add_argument('--print-interval', type=int, default=1,
                        help='Print statistics every N episodes')
     parser.add_argument('--save-interval', type=int, default=100,
                        help='Save model every N episodes')
@@ -145,6 +145,22 @@ def get_mcts_args():
         args.internal_node_length = 6
     elif args.setting == 3:
         args.internal_node_length = 7
+    
+    # Auto-calculate internal_node_holder based on container volume and min item size
+    # This ensures we can fit as many items as the container can physically hold
+    container_volume = args.container_size[0] * args.container_size[1] * args.container_size[2]
+    min_item_size = min(min(item) for item in args.item_size_set)
+    min_item_volume = min_item_size ** 3  # Smallest possible item volume
+    
+    # Maximum theoretical items = container_volume / min_item_volume
+    # Add some buffer to be safe
+    max_theoretical_items = int(container_volume / min_item_volume) + 10
+    
+    # Use the larger of user-specified or calculated value
+    if args.internal_node_holder < max_theoretical_items:
+        print(f"Auto-adjusting internal_node_holder: {args.internal_node_holder} -> {max_theoretical_items}")
+        print(f"  (Based on container volume {container_volume} / min item volume {min_item_volume})")
+        args.internal_node_holder = max_theoretical_items
     
     return args
 
